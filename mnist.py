@@ -112,7 +112,7 @@ def launcher():
                               instance_type='c5.large')
     task.upload('mnist.py')
     task.run('source activate pytorch_p36')
-    task.run('python mnist.py')
+    task.run('python mnist.py', stream_output=True)
 
 
 if __name__ == '__main__':
