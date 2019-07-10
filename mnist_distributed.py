@@ -10,8 +10,12 @@ python mnist.py --remote
 """
 
 from __future__ import print_function
+
 import argparse
+import os
+
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -46,7 +50,7 @@ def train(model, device, train_loader, optimizer, epoch):
         loss = F.nll_loss(output, target)
         loss.backward()
         optimizer.step()
-        if batch_idx % args.log_interval == 0:
+        if batch_idx % args.log_interval == 0 and args.local_rank == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
@@ -66,21 +70,42 @@ def test(model, device, test_loader):
 
     test_loss /= len(test_loader.dataset)
 
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+    if args.local_rank == 0:
+        print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+            test_loss, correct, len(test_loader.dataset),
+            100. * correct / len(test_loader.dataset)))
 
 
-def worker():
+def worker(ddp=True):
+    """
+    Main training script.
+
+    Args:
+        ddp: True if this script runs as part of DistributedDataParallel ensemble
+    """
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
     torch.manual_seed(args.seed)
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    rank = int(os.environ.get('RANK', 0))
+
+    if ddp:
+        dist.init_process_group(backend='gloo', init_method='env://')
+     
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+
+    # only download dataset once per machine, sync workers
+    if args.local_rank == 0:
+        datasets.MNIST('/tmp/data', download=True)
+        print(f"DDP: process {rank}/{world_size}")
+    if ddp:
+        dist.barrier()
+        
     train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('/tmp/data', train=True, download=True,
+        datasets.MNIST('/tmp/data', train=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))
@@ -94,6 +119,11 @@ def worker():
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
     model = Net().to(device)
+    if ddp:
+        model = nn.parallel.DistributedDataParallel(model)
+    else:
+        model = nn.DataParallel(model, dim=1)
+
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     for epoch in range(1, args.epochs + 1):
@@ -104,15 +134,43 @@ def worker():
         torch.save(model.state_dict(), "mnist_cnn.pt")
 
 
-def launcher():
+def format_args(dict_: dict):
+    """Helper to format dict into "--key1=val2 --key2=val2" string"""
+    def item_to_arg(item: tuple):
+        k, v = item
+        if v is False or v is None:
+            return ''
+        if v is True:
+            return f'--{k}'
+        return f'--{k} {v}'
+
+    return ' '.join([item_to_arg(item) for item in dict_.items()])+' '
+
+
+def remote_launcher():
     import ncluster
 
-    task = ncluster.make_task(name='mnist',
-                              image_name='Deep Learning AMI (Ubuntu) Version 23.0',
-                              instance_type='c5.large')
-    task.upload('mnist.py')
-    task.run('source activate pytorch_p36')
-    task.run('python mnist.py')
+    job = ncluster.make_job(name='mnist_distributed',
+                            image_name='Deep Learning AMI (Ubuntu) Version 23.0',
+                            instance_type='c5.xlarge',
+                            num_tasks=args.nnodes)
+
+    job.upload('mnist_distributed.py')
+    job.run('rm -Rf /tmp/data')
+    job.run('source activate pytorch_p36')
+    task0 = job.tasks[0]
+    for i, task in enumerate(job.tasks):
+        launcher_args = {'nproc_per_node': args.proc_per_node,
+                         'nnodes': args.nnodes,
+                         'node_rank': i,
+                         'master_addr': task0.ip,
+                         'master_port': 6016}
+        task.run((f'python -m torch.distributed.launch {format_args(launcher_args)} '
+                  f'mnist_distributed.py --mode=worker'), non_blocking=True, stream_output=(i == 0))
+
+
+def local_launcher():
+    os.system(f'python -m torch.distributed.launch --nproc_per_node={args.proc_per_node} mnist_distributed.py --mode=worker ')
 
 
 if __name__ == '__main__':
@@ -139,9 +197,20 @@ if __name__ == '__main__':
     parser.add_argument('--remote', action='store_true', default=False,
                         help='run training remotely')
 
-    args = parser.parse_args()
+    parser.add_argument('--proc_per_node', default=2, help='number of processes per machine')
+    parser.add_argument('--nnodes', default=1, type=int, help='number of nodes (machines)')
 
-    if args.remote:
-        launcher()
-    else:
+    parser.add_argument('--mode', default='localworker', choices=['remote', 'local', 'worker', 'localworker'], help="local: spawn multiple processes locally, remote: launch multiple machines/processes on AWS, worker: DDP aware single process process version, localworker: standalone single process version")
+
+    # worker args
+    parser.add_argument('--local_rank', default=0, type=int)
+
+    args = parser.parse_args()
+    if args.mode == 'remote':
+        remote_launcher()
+    elif args.mode == 'local':
+        local_launcher()
+    elif args.mode == 'worker':
         worker()
+    elif args.mode == 'localworker':
+        worker(ddp=False)
