@@ -198,7 +198,7 @@ if __name__ == '__main__':
                         help='run training remotely')
 
     parser.add_argument('--proc_per_node', default=2, help='number of processes per machine')
-    parser.add_argument('--nnodes', default=1, type=int, help='number of nodes (machines)')
+    parser.add_argument('--nnodes', default=2, type=int, help='number of nodes (machines)')
 
     parser.add_argument('--mode', default='localworker', choices=['remote', 'local', 'worker', 'localworker'], help="local: spawn multiple processes locally, remote: launch multiple machines/processes on AWS, worker: DDP aware single process process version, localworker: standalone single process version")
 
