@@ -1,5 +1,5 @@
 # pytorch-aws
-Example code for "PyTorch on AWS made easy." AWS bits are done through [ncluster](https://github.com/cybertronai/ncluster) library.
+Example code for [PyTorch on AWS made easy](https://docs.google.com/document/d/1LuCACKdXTbptHzXb81sGA1CevRW44wQ5znxXylj8S5A/edit) AWS bits are done through [ncluster](https://github.com/cybertronai/ncluster) library.
 
 Tested with PyTorch 1.1/Python 3.6
 ```
